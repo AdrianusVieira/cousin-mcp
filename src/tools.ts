@@ -1,15 +1,17 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { getAccessToken } from "./auth";
 import { assertIdentifier, runReadOnlyQuery } from "./db";
-import { mintApiToken } from "./jwt";
 
 // Only the config the tools actually need. Kept separate from the hosted
 // Worker's Env so the local (stdio) server doesn't depend on any Cloudflare types.
 export interface ToolEnv {
   COUSIN_API_BASE_URL: string;
+  COUSIN_EMAIL: string;
+  COUSIN_PASSWORD: string;
   DATABASE_URL: string;
-  MCP_ACTOR_SUB: string;
-  SUPABASE_JWT_SECRET: string;
+  SUPABASE_ANON_KEY: string;
+  SUPABASE_URL: string;
 }
 
 // Compact catalog of the Fastify API so Claude can drive api_get/api_write
@@ -57,7 +59,7 @@ function normalizeApiPath(path: string): string {
 }
 
 async function callApi(env: ToolEnv, method: string, path: string, body?: unknown): Promise<string> {
-  const token = await mintApiToken(env.SUPABASE_JWT_SECRET, env.MCP_ACTOR_SUB);
+  const token = await getAccessToken(env);
   const url = new URL(normalizeApiPath(path), env.COUSIN_API_BASE_URL).href;
 
   const resp = await fetch(url, {
