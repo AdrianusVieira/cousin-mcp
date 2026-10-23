@@ -17,9 +17,11 @@ function requireEnv(name: string): string {
 
 const env: ToolEnv = {
   COUSIN_API_BASE_URL: requireEnv("COUSIN_API_BASE_URL"),
+  COUSIN_EMAIL: requireEnv("COUSIN_EMAIL"),
+  COUSIN_PASSWORD: requireEnv("COUSIN_PASSWORD"),
   DATABASE_URL: requireEnv("DATABASE_URL"),
-  MCP_ACTOR_SUB: process.env.MCP_ACTOR_SUB ?? "00000000-0000-0000-0000-000000000000",
-  SUPABASE_JWT_SECRET: requireEnv("SUPABASE_JWT_SECRET"),
+  SUPABASE_ANON_KEY: requireEnv("SUPABASE_ANON_KEY"),
+  SUPABASE_URL: requireEnv("SUPABASE_URL"),
 };
 
 const server = new McpServer({ name: "cousin", version: "0.1.0" });

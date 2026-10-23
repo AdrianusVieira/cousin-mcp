@@ -37,9 +37,20 @@ npm run build      # → dist/stdio.mjs
 
 ### 3. Wire it into Claude
 
-Three env vars: `DATABASE_URL`, `SUPABASE_JWT_SECRET` (same value as `cousin-backend/.env`),
-`COUSIN_API_BASE_URL` (your Render URL, or `http://localhost:3000` while the backend runs locally).
-Optional: `MCP_ACTOR_SUB` (a UUID for cleaner audit logs).
+Env vars:
+
+| Variable              | What it is                                                              |
+| --------------------- | ----------------------------------------------------------------------- |
+| `DATABASE_URL`        | Read-only Postgres role from step 2.                                    |
+| `COUSIN_API_BASE_URL` | Your deployed API, or `http://localhost:3000` while it runs locally.    |
+| `SUPABASE_URL`        | `https://<project-ref>.supabase.co`                                     |
+| `SUPABASE_ANON_KEY`   | Supabase → Settings → API → anon/public key.                            |
+| `COUSIN_EMAIL`        | The account the server signs in as.                                     |
+| `COUSIN_PASSWORD`     | That account's password.                                                |
+
+The server signs in with the password grant and uses the resulting ES256 access
+token, refreshing it as it expires. That token belongs to exactly one user, and
+the backend additionally checks it against its own `ALLOWED_USER_IDS`.
 
 **Claude Desktop** — edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -48,11 +59,14 @@ Optional: `MCP_ACTOR_SUB` (a UUID for cleaner audit logs).
   "mcpServers": {
     "cousin": {
       "command": "node",
-      "args": ["/Users/4089dtidigital/Developer/Cousin/cousin-mcp/dist/stdio.mjs"],
+      "args": ["/path/to/cousin-mcp/dist/stdio.mjs"],
       "env": {
         "DATABASE_URL": "postgres://cousin_mcp_ro:...@...pooler.supabase.com:6543/postgres",
-        "SUPABASE_JWT_SECRET": "same-as-backend",
-        "COUSIN_API_BASE_URL": "https://cousin-backend.onrender.com"
+        "COUSIN_API_BASE_URL": "https://<your-api-host>",
+        "SUPABASE_URL": "https://<project-ref>.supabase.co",
+        "SUPABASE_ANON_KEY": "...",
+        "COUSIN_EMAIL": "you@example.com",
+        "COUSIN_PASSWORD": "..."
       }
     }
   }
@@ -66,9 +80,12 @@ Restart Claude Desktop. The `cousin` tools appear in the tools menu.
 ```bash
 claude mcp add cousin \
   --env DATABASE_URL="postgres://cousin_mcp_ro:...:6543/postgres" \
-  --env SUPABASE_JWT_SECRET="same-as-backend" \
-  --env COUSIN_API_BASE_URL="https://cousin-backend.onrender.com" \
-  -- node /Users/4089dtidigital/Developer/Cousin/cousin-mcp/dist/stdio.mjs
+  --env COUSIN_API_BASE_URL="https://<your-api-host>" \
+  --env SUPABASE_URL="https://<project-ref>.supabase.co" \
+  --env SUPABASE_ANON_KEY="..." \
+  --env COUSIN_EMAIL="you@example.com" \
+  --env COUSIN_PASSWORD="..." \
+  -- node /path/to/cousin-mcp/dist/stdio.mjs
 ```
 
 ## Try it
@@ -82,8 +99,11 @@ then *"show my dashboard for this month"* (uses `api_get`).
   you'd rather skip the build step during development.)
 - **`api_write` mutates production.** It goes through your validated endpoints, but it can create,
   edit, and delete real data. Confirm before destructive calls, and keep Supabase backups on.
-- **HS256 dependency:** `api_*` tools mint HS256 tokens with `SUPABASE_JWT_SECRET`, accepted by the
-  legacy branch in `cousin-backend/src/middleware/auth.ts`. When you remove that branch, update
-  `src/jwt.ts`.
+- **Credentials in the client config:** `COUSIN_PASSWORD` sits in your Claude config file in plain
+  text. Keep that file readable only by you, and use an account you can rotate. The server never
+  writes the password or the session anywhere - the session is held in memory for the process
+  lifetime only.
+- **Allowlisted, not just authenticated:** the backend rejects any token whose `sub` is not in its
+  `ALLOWED_USER_IDS`, so signing in with some other Supabase account will not get you in.
 - **Want browser / Cowork access later?** That needs the hosted (remote MCP + OAuth) variant. The
   tool code here (`db.ts`, `jwt.ts`, `tools.ts`) is reused unchanged; ask and I'll add it back.
