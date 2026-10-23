@@ -17,13 +17,15 @@ export interface ToolEnv {
 // Compact catalog of the Fastify API so Claude can drive api_get/api_write
 // without guessing. Mirrors cousin-backend/reference-files/endpoints.md.
 const API_CATALOG = `All paths are under /api and require auth (handled automatically).
-Money values are integer cents. Dates are YYYY-MM-DD.
+Money values are decimal strings, e.g. "1234.56", never numbers or integer cents. Dates are YYYY-MM-DD.
+categoryId is required when creating debit or credit transactions.
 
-Dashboard:  GET /dashboard?from&to
+Dashboard:  GET /dashboard?from&to | GET /dashboard/details?from&to&metric(income|outcome|net|savingsRate)
 Transactions:
-  GET /transactions?from&to&method(all|debit|credit)&category&wallet&cursor&limit
-  POST /transactions  (debit: {method,amount,date,description?,categoryId?,fromType,fromId?,toType,toId?}
-                       credit:{method,amount,date,description?,categoryId?,fromId,toType,toId?,term?,installmentTotal?})
+  GET /transactions?from&to&method(all|debit|credit)&category(uuid|uncategorized)&wallet&search&cursor&limit
+  POST /transactions  (debit: {method,amount,date,description?,categoryId,fromType,fromId?,toType,toId?}
+                       credit:{method,amount,date,description?,categoryId,fromId,toType,toId?,term?,installmentTotal?})
+  PATCH /transactions/categories {transactionIds:[UUID] (1..200),categoryId:UUID}
   GET /transactions/:id | PATCH /transactions/:id {amount?,date?,description?,categoryId?} | DELETE /transactions/:id
 Credit:     GET /credit?status(all|settled|unsettled) | POST /credit/settle {transactionIds:[]}
 Bills:
@@ -36,6 +38,7 @@ Recurrences:
   GET /recurrences?from&to | GET /recurrences/:id
   PATCH /recurrences/:id {intervalUnit?,intervalValue?,isVariable?,recurrentDay?,recurrentMonth?} | POST /recurrences/:id/deactivate
 Wallets:
+  GET /wallets/forecast?days(30|60|90) — read-only scheduled cash preview
   GET /wallets?active&from&to | POST /wallets {name,description?}
   GET /wallets/:id?from&to | PATCH /wallets/:id {name?,description?,balance?} | POST /wallets/:id/archive | /unarchive
 Sources:
@@ -58,7 +61,12 @@ function normalizeApiPath(path: string): string {
   return clean.startsWith("/api/") || clean === "/api" ? clean : `/api${clean}`;
 }
 
-async function callApi(env: ToolEnv, method: string, path: string, body?: unknown): Promise<string> {
+async function callApi(
+  env: ToolEnv,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<string> {
   const token = await getAccessToken(env);
   const url = new URL(normalizeApiPath(path), env.COUSIN_API_BASE_URL).href;
 
@@ -79,7 +87,11 @@ async function callApi(env: ToolEnv, method: string, path: string, body?: unknow
     // leave as raw text
   }
 
-  return JSON.stringify({ status: resp.status, ok: resp.ok, body: parsed }, null, 2);
+  return JSON.stringify(
+    { status: resp.status, ok: resp.ok, body: parsed },
+    null,
+    2,
+  );
 }
 
 export function registerTools(server: McpServer, env: ToolEnv) {
@@ -94,7 +106,9 @@ export function registerTools(server: McpServer, env: ToolEnv) {
         const rows = await runReadOnlyQuery(env.DATABASE_URL, sql);
         return jsonResult({ rowCount: rows.length, rows });
       } catch (e) {
-        return textResult(`Query error: ${e instanceof Error ? e.message : String(e)}`);
+        return textResult(
+          `Query error: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     },
   );
@@ -111,7 +125,9 @@ export function registerTools(server: McpServer, env: ToolEnv) {
         );
         return jsonResult(rows);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : String(e)}`);
+        return textResult(
+          `Error: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     },
   );
@@ -132,7 +148,9 @@ export function registerTools(server: McpServer, env: ToolEnv) {
         );
         return jsonResult(rows);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : String(e)}`);
+        return textResult(
+          `Error: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     },
   );
@@ -156,7 +174,9 @@ export function registerTools(server: McpServer, env: ToolEnv) {
       try {
         return textResult(await callApi(env, "GET", path));
       } catch (e) {
-        return textResult(`Request error: ${e instanceof Error ? e.message : String(e)}`);
+        return textResult(
+          `Request error: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     },
   );
@@ -166,14 +186,18 @@ export function registerTools(server: McpServer, env: ToolEnv) {
     "Call a mutating endpoint (POST/PATCH/DELETE) on the Cousin API. Writes go through the backend's validation and business rules. Path is relative to /api. THIS MUTATES PRODUCTION DATA — confirm intent with the user before destructive calls.",
     {
       method: z.enum(["POST", "PATCH", "DELETE"]),
-      path: z.string().describe("Endpoint path, e.g. '/wallets' or '/bills/<id>'."),
+      path: z
+        .string()
+        .describe("Endpoint path, e.g. '/wallets' or '/bills/<id>'."),
       body: z.record(z.any()).optional().describe("JSON body for POST/PATCH."),
     },
     async ({ method, path, body }) => {
       try {
         return textResult(await callApi(env, method, path, body));
       } catch (e) {
-        return textResult(`Request error: ${e instanceof Error ? e.message : String(e)}`);
+        return textResult(
+          `Request error: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     },
   );
