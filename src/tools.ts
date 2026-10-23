@@ -18,15 +18,22 @@ export interface ToolEnv {
 // without guessing. Mirrors cousin-backend/reference-files/endpoints.md.
 const API_CATALOG = `All paths are under /api and require auth (handled automatically).
 Money values are decimal strings, e.g. "1234.56", never numbers or integer cents. Dates are YYYY-MM-DD.
-categoryId is required when creating debit or credit transactions.
+Transaction creation requires categoryAllocations:[{categoryId:UUID,amount:decimal string}] (1..100 unique active categories).
+Enter the actual amount per category; do not split equally unless the user specifies that. Allocations must sum exactly to amount.
+Legacy categoryId is accepted instead for a single category (full amount); never send both fields.
+Transaction responses include categoryAllocations:[{categoryId,categoryName,amount}]; category is populated only for single-category transactions.
+Category filters and category reports sum allocated amounts. Unfiltered transaction, wallet and dashboard totals count each transaction once.
+For installments, amount and allocations apply to each installment, as with existing transaction creation.
+PATCH accepts categoryAllocations:[] to clear assignments; changing a split total requires balanced replacement allocations.
+Bulk category assignment replaces every selected transaction's allocations with the full amount in one category.
 
 Dashboard:  GET /dashboard?from&to | GET /dashboard/details?from&to&metric(income|outcome|net|savingsRate)
 Transactions:
   GET /transactions?from&to&method(all|debit|credit)&category(uuid|uncategorized)&wallet&search&cursor&limit
-  POST /transactions  (debit: {method,amount,date,description?,categoryId,fromType,fromId?,toType,toId?}
-                       credit:{method,amount,date,description?,categoryId,fromId,toType,toId?,term?,installmentTotal?})
+  POST /transactions  (debit: {method,amount,date,description?,categoryAllocations,fromType,fromId?,toType,toId?}
+                       credit:{method,amount,date,description?,categoryAllocations,fromId,toType,toId?,term?,installmentTotal?})
   PATCH /transactions/categories {transactionIds:[UUID] (1..200),categoryId:UUID}
-  GET /transactions/:id | PATCH /transactions/:id {amount?,date?,description?,categoryId?} | DELETE /transactions/:id
+  GET /transactions/:id | PATCH /transactions/:id {amount?,date?,description?,categoryAllocations? (or legacy categoryId?)} | DELETE /transactions/:id
 Credit:     GET /credit?status(all|settled|unsettled) | POST /credit/settle {transactionIds:[]}
 Bills:
   GET /bills?from&to&status(all|unpaid|paid|overdue)&active | POST /bills {name,value,term,sourceId,description?,recurrence?}
