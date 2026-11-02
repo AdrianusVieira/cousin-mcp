@@ -14,8 +14,21 @@ const MAX_RUNNER_COMMAND_LENGTH = 2000;
 // exec, time, sudo, nohup and nice wrappers may come before the runner.
 const CD_CALL = /(?:^|[;&|(\n])\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/g;
 const INSTALL_FLAGS = /^(-y|--yes|-p|--package)(=|$)/;
-const RUNNER_CALL =
-  /(?:^|[;&|(\n])\s*(?:(?:env|command|exec|time|sudo|nohup|nice)(?:\s+-[^\s;&|)]+)*\s+|[A-Za-z_]\w*=[^\s;&|)]*\s+)*(npx|bunx|npm\s+(?:exec|x)|pnpx|pnpm\s+dlx|yarn\s+dlx)((?:\s+--?[^\s;&|)-][^\s;&|)]*)*)\s+([^\s;&|)-][^\s;&|)]*)/g;
+// A wrapper flag may take its own value as a separate token (`nice -n 10`, `sudo -u alice`), so one
+// optional non-dash value token is allowed after each dash-flag.
+const WRAPPER_PREFIX = '(?:env|command|exec|time|sudo|nohup|nice)';
+const RUNNER_NAMES = '(npx|bunx|npm\\s+(?:exec|x)|pnpx|pnpm\\s+dlx|yarn\\s+dlx)';
+const RUNNER_CALL = new RegExp(
+  `(?:^|[;&|(\\n])\\s*(?:${WRAPPER_PREFIX}(?:\\s+-[^\\s;&|)]+(?:\\s+[^\\s;&|)-][^\\s;&|)]*)?)*\\s+|[A-Za-z_]\\w*=[^\\s;&|)]*\\s+)*${RUNNER_NAMES}((?:\\s+(?:--?(?=[\\s;&|)]|$)|--?[^\\s;&|)-][^\\s;&|)]*))*)\\s+([^\\s;&|)-][^\\s;&|)]*)`,
+  'g',
+);
+// Looser version of the same command-position prefix, used only to detect a runner name the stricter
+// RUNNER_CALL above failed to fully parse (unusual flags, an unhandled wrapper shape) — never to decide
+// anything about the call itself. Any wrapper-token shape counts here, not just dash-flags.
+const RUNNER_IN_POSITION = new RegExp(
+  `(?:^|[;&|(\\n])\\s*(?:${WRAPPER_PREFIX}(?:\\s+[^\\s;&|)]+)*\\s+|[A-Za-z_]\\w*=[^\\s;&|)]*\\s+)*${RUNNER_NAMES}\\b`,
+  'g',
+);
 const ALWAYS_DOWNLOADS = /^(pnpx|pnpm\s+dlx|yarn\s+dlx)$/;
 // npm's package-name syntax. Anything else (a path, a URL, a git spec, a quote or escape the shell would strip)
 // could point the installed check at the wrong file.
@@ -46,6 +59,7 @@ const LABELS = {
   opaque: () => `Blocked: this command hides a package runner behind eval/backticks/$()/xargs or another shell, which the guard cannot fully parse. Ask Adrianus before installing anything.`,
   quotedFlag: (call) => `Blocked: "${call}" quotes or escapes a flag, so the guard cannot check it. Write the flags plainly.`,
   tooLong: (length) => `Blocked: this command is ${length} characters long and mentions a package runner, too long for the guard to check safely. Ask Adrianus.`,
+  unparsed: (call) => `Blocked: "${call}" invokes a package runner in a shape the guard cannot fully parse (unusual flags or wrapper options). Ask Adrianus before installing anything.`,
   unresolvableCd: () => `Blocked: this command changes directory in a way the guard cannot resolve (pushd/popd, "cd -", a bare cd, or a computed path), so it cannot verify where a package runner would run. Ask Adrianus before installing anything.`,
   versioned: (spec) => `Blocked: "${spec}" names a version, which the runner may download. Use node_modules/.bin/<tool> from the project, or ask Adrianus.`,
 };
@@ -100,6 +114,13 @@ function check(input) {
       if (current === path.dirname(current)) return false;
     }
   };
+
+  // Fail closed on any runner name in command position that RUNNER_CALL's stricter shape didn't
+  // capture at that exact spot — an unparseable call is treated as a bypass attempt, not let through.
+  const parsedStarts = new Set([...command.matchAll(RUNNER_CALL)].map((match) => match.index));
+  for (const match of command.matchAll(RUNNER_IN_POSITION)) {
+    if (!parsedStarts.has(match.index)) block(LABELS.unparsed(match[0].trim()));
+  }
 
   for (const match of command.matchAll(RUNNER_CALL)) {
     const [call, runner, flags, spec] = match;
