@@ -14,20 +14,29 @@ const MAX_RUNNER_COMMAND_LENGTH = 2000;
 // exec, time, sudo, nohup and nice wrappers may come before the runner.
 const CD_CALL = /(?:^|[;&|(\n])\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/g;
 const INSTALL_FLAGS = /^(-y|--yes|-p|--package)(=|$)/;
+// A directory path (relative or absolute) in front of a wrapper word or runner name — "./node_modules/.bin/npx"
+// or "/usr/bin/sudo" — must still be recognized as that word, not treated as unparseable prose.
+const PATH_PREFIX = '(?:[^\\s;&|)]*/)?';
+// A wrapper or runner keyword cannot double as a wrapper flag's own value token (`nice -n npx` is not
+// "npx" the value of "-n", it is npx as the actual command) — the lookahead forces the flags loop to stop
+// right before one instead of swallowing it.
+const KEYWORD = '(?:npx|bunx|pnpx|npm|pnpm|yarn|env|command|exec|time|sudo|nohup|nice)';
 // A wrapper flag may take its own value as a separate token (`nice -n 10`, `sudo -u alice`), so one
-// optional non-dash value token is allowed after each dash-flag.
+// optional non-dash, non-keyword value token is allowed after each dash-flag.
 const WRAPPER_PREFIX = '(?:env|command|exec|time|sudo|nohup|nice)';
+const WRAPPER_VALUE = `(?:\\s+(?!${KEYWORD}\\b)[^\\s;&|)-][^\\s;&|)]*)?`;
 const RUNNER_NAMES = '(npx|bunx|npm\\s+(?:exec|x)|pnpx|pnpm\\s+dlx|yarn\\s+dlx)';
 const RUNNER_CALL = new RegExp(
-  `(?:^|[;&|(\\n])\\s*(?:${WRAPPER_PREFIX}(?:\\s+-[^\\s;&|)]+(?:\\s+[^\\s;&|)-][^\\s;&|)]*)?)*\\s+|[A-Za-z_]\\w*=[^\\s;&|)]*\\s+)*${RUNNER_NAMES}((?:\\s+(?:--?(?=[\\s;&|)]|$)|--?[^\\s;&|)-][^\\s;&|)]*))*)\\s+([^\\s;&|)-][^\\s;&|)]*)`,
-  'g',
+  `(?:^|[;&|(\\n])\\s*(?:${PATH_PREFIX}${WRAPPER_PREFIX}(?:\\s+-[^\\s;&|)]+${WRAPPER_VALUE})*\\s+|[A-Za-z_]\\w*=[^\\s;&|)]*\\s+)*${PATH_PREFIX}${RUNNER_NAMES}((?:\\s+(?:--?(?=[\\s;&|)]|$)|--?[^\\s;&|)-][^\\s;&|)]*))*)\\s+([^\\s;&|)-][^\\s;&|)]*)`,
+  'gd',
 );
 // Looser version of the same command-position prefix, used only to detect a runner name the stricter
 // RUNNER_CALL above failed to fully parse (unusual flags, an unhandled wrapper shape) — never to decide
-// anything about the call itself. Any wrapper-token shape counts here, not just dash-flags.
+// anything about the call itself. Any wrapper-token shape counts here, not just dash-flags, but a
+// keyword still can't be swallowed as one of those tokens, for the same reason as WRAPPER_VALUE above.
 const RUNNER_IN_POSITION = new RegExp(
-  `(?:^|[;&|(\\n])\\s*(?:${WRAPPER_PREFIX}(?:\\s+[^\\s;&|)]+)*\\s+|[A-Za-z_]\\w*=[^\\s;&|)]*\\s+)*${RUNNER_NAMES}\\b`,
-  'g',
+  `(?:^|[;&|(\\n])\\s*(?:${PATH_PREFIX}${WRAPPER_PREFIX}(?:\\s+(?!${KEYWORD}\\b)[^\\s;&|)]+)*\\s+|[A-Za-z_]\\w*=[^\\s;&|)]*\\s+)*${PATH_PREFIX}${RUNNER_NAMES}\\b`,
+  'gd',
 );
 const ALWAYS_DOWNLOADS = /^(pnpx|pnpm\s+dlx|yarn\s+dlx)$/;
 // npm's package-name syntax. Anything else (a path, a URL, a git spec, a quote or escape the shell would strip)
@@ -115,11 +124,13 @@ function check(input) {
     }
   };
 
-  // Fail closed on any runner name in command position that RUNNER_CALL's stricter shape didn't
-  // capture at that exact spot — an unparseable call is treated as a bypass attempt, not let through.
-  const parsedStarts = new Set([...command.matchAll(RUNNER_CALL)].map((match) => match.index));
+  // Fail closed on any runner name in command position whose own token start RUNNER_CALL's stricter
+  // shape didn't land on — comparing the runner token itself, not just the overall match start, so a
+  // wrapper-prefix that the two regexes read differently in length still can't hide a bypass.
+  const runnerTokenStart = (match) => match.indices[1][0];
+  const parsedRunnerStarts = new Set([...command.matchAll(RUNNER_CALL)].map(runnerTokenStart));
   for (const match of command.matchAll(RUNNER_IN_POSITION)) {
-    if (!parsedStarts.has(match.index)) block(LABELS.unparsed(match[0].trim()));
+    if (!parsedRunnerStarts.has(runnerTokenStart(match))) block(LABELS.unparsed(match[0].trim()));
   }
 
   for (const match of command.matchAll(RUNNER_CALL)) {
