@@ -1,3 +1,5 @@
+// Source: roggenhub/.claude/hooks/npx-guard.mjs. Edit only there; roggenhub/scripts/sync-npx-guard.mjs copies it
+// to the other repositories.
 // PreToolUse hook on Bash: blocks package runners that would download a package nobody approved.
 // npx, npm exec / npm x and bunx run a local tool when it is installed and download it otherwise;
 // pnpm dlx, pnpx and yarn dlx always download. Exit 2 blocks the command and shows the message to
@@ -5,71 +7,55 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-// A command mentioning a runner but long enough to risk pathological regex backtracking is blocked
-// outright rather than scanned.
-const MAX_RUNNER_COMMAND_LENGTH = 2000;
-
 // Only calls in command position (start of a line, or after ; & | or a parenthesis) count, so text that
 // merely mentions a runner (an echo, a commit message) is not blocked. Env assignments and the env, command,
-// exec, time, sudo, nohup and nice wrappers may come before the runner.
-const CD_CALL = /(?:^|[;&|(\n])\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/g;
-const INSTALL_FLAGS = /^(-y|--yes|-p|--package)(=|$)/;
-// A directory path (relative or absolute) in front of a wrapper word or runner name — "./node_modules/.bin/npx"
-// or "/usr/bin/sudo" — must still be recognized as that word, not treated as unparseable prose.
-const PATH_PREFIX = '(?:[^\\s;&|)]*/)?';
-// A wrapper or runner keyword cannot double as a wrapper flag's own value token (`nice -n npx` is not
-// "npx" the value of "-n", it is npx as the actual command) — the lookahead forces the flags loop to stop
-// right before one instead of swallowing it.
-const KEYWORD = '(?:npx|bunx|pnpx|npm|pnpm|yarn|env|command|exec|time|sudo|nohup|nice)';
-// A wrapper flag may take its own value as a separate token (`nice -n 10`, `sudo -u alice`), so one
-// optional non-dash, non-keyword value token is allowed after each dash-flag.
-const WRAPPER_PREFIX = '(?:env|command|exec|time|sudo|nohup|nice)';
-const WRAPPER_VALUE = `(?:\\s+(?!${KEYWORD}\\b)[^\\s;&|)-][^\\s;&|)]*)?`;
-const RUNNER_NAMES = '(npx|bunx|npm\\s+(?:exec|x)|pnpx|pnpm\\s+dlx|yarn\\s+dlx)';
-const RUNNER_CALL = new RegExp(
-  `(?:^|[;&|(\\n])\\s*(?:${PATH_PREFIX}${WRAPPER_PREFIX}(?:\\s+-[^\\s;&|)]+${WRAPPER_VALUE})*\\s+|[A-Za-z_]\\w*=[^\\s;&|)]*\\s+)*${PATH_PREFIX}${RUNNER_NAMES}((?:\\s+(?:--?(?=[\\s;&|)]|$)|--?[^\\s;&|)-][^\\s;&|)]*))*)\\s+([^\\s;&|)-][^\\s;&|)]*)`,
-  'gd',
-);
-// Looser version of the same command-position prefix, used only to detect a runner name the stricter
-// RUNNER_CALL above failed to fully parse (unusual flags, an unhandled wrapper shape) — never to decide
-// anything about the call itself. Any wrapper-token shape counts here, not just dash-flags, but a
-// keyword still can't be swallowed as one of those tokens, for the same reason as WRAPPER_VALUE above.
-const RUNNER_IN_POSITION = new RegExp(
-  `(?:^|[;&|(\\n])\\s*(?:${PATH_PREFIX}${WRAPPER_PREFIX}(?:\\s+(?!${KEYWORD}\\b)[^\\s;&|)]+)*\\s+|[A-Za-z_]\\w*=[^\\s;&|)]*\\s+)*${PATH_PREFIX}${RUNNER_NAMES}\\b`,
-  'gd',
-);
+// exec, nice, nohup, sudo and time wrappers may come before the runner, and a wrapper or runner may be called by
+// its path (/usr/local/bin/npx).
+const CD_STEP = /(?:^|[;&|(\n])\s*(cd|pushd|popd)(?=[\s;&|)]|$)([^;&|)\n]*)/g;
+// A cd target the guard can follow: one quoted or bare word, with no expansion and no flag.
+const CD_TARGET = /^(?:"([^"$`]*)"|'([^']*)'|([^\s"'$`-][^\s"'$`]*))$/;
+// npm accepts any unambiguous prefix of a long flag (--pack=x is --package=x) and bundles short ones (-yq).
+const INSTALL_FLAG_NAMES = ['package', 'yes'];
+const INSTALL_SHORT_FLAG = /^-[^-]*[py]/;
+// Commands longer than this that mention a runner are blocked unread, so no regex scans an unbounded input.
+const MAX_RUNNER_COMMAND_LENGTH = 2000;
+// Backticks, $(), eval, xargs and bash/sh/zsh -c run text the position-based match cannot see into.
+const OPAQUE_SHELL = /`|\$\(|\beval\b|\bxargs\b|\b(?:bash|sh|zsh)\s+-[A-Za-z]*c/;
+// A flag written plainly. Quotes, escapes, expansions, braces and globs the shell would rewrite are not, so the
+// guard cannot read them as the runner will.
+const PLAIN_FLAG = /^(--|--?[A-Za-z][A-Za-z0-9-]*(=[A-Za-z0-9._/@:~-]*)?)$/;
+const RUNNER_CALL =
+  /(?:^|[;&|(\n])\s*(?:(?:[^\s;&|)]*\/)?(?:env|command|exec|nice|nohup|sudo|time)(?:\s+-[^\s;&|)]+)*\s+|[A-Za-z_]\w*=[^\s;&|)]*\s+)*(?:[^\s;&|)]*\/)?(npx|bunx|npm\s+(?:exec|x)|pnpx|pnpm\s+dlx|yarn\s+dlx)((?:\s+(?:--|--?[^\s;&|)-][^\s;&|)]*))*)\s+([^\s;&|)-][^\s;&|)]*)/g;
+// A runner name standing alone or ending a path, so a file like npx-guard.mjs or a path like bin/npx.d is not a
+// mention, and /usr/local/bin/npx is.
+const RUNNER_MENTION = /(?<![\w.-])(?:npx|bunx|pnpx|npm\s+(?:exec|x)|pnpm\s+dlx|yarn\s+dlx)(?![\w./-])/;
+// A segment between separators, and the words that make it a runner call: a runner or a wrapper, after any
+// env assignments.
+// The separator comes first so a leading "(" opens its own segment instead of an empty one at ^.
+const SEGMENT = /(?:[;&|(\n]|^)[^;&|(\n]*/g;
+const SEGMENT_START = /^\s*(?:[A-Za-z_]\w*=[^\s;&|)]*\s+)*(?:[^\s;&|)]*\/)?(?:env|command|exec|nice|nohup|sudo|time|npx|bunx|pnpx|npm|pnpm|yarn)\b/;
 const ALWAYS_DOWNLOADS = /^(pnpx|pnpm\s+dlx|yarn\s+dlx)$/;
 // npm's package-name syntax. Anything else (a path, a URL, a git spec, a quote or escape the shell would strip)
 // could point the installed check at the wrong file.
 const PACKAGE_NAME = /^(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
-// Quotes, escapes and expansions the shell would rewrite, so the guard cannot read the flag as the runner will.
-const SHELL_QUOTING = /["'\\$`]/;
 // "tsx@5" or "@scope/name@1.2": a version or tag the local install may not have, so the runner may download it.
 const VERSIONED = /^(@[^/]+\/)?[^@]+@/;
-// A runner name can also reach the shell through a construct this guard cannot parse into positions:
-// command substitution, a backtick, `eval`, `xargs`, or handing the string to another shell with -c.
-const OPAQUE_SHELL = /`|\$\(|\b(?:eval|xargs|bash\s+-c|sh\s+-c|zsh\s+-c)\b/;
-const RUNNER_NAME = /\b(?:npx|bunx|pnpx|npm\s+(?:exec|x)|pnpm\s+dlx|yarn\s+dlx)\b/;
-// pushd/popd move the shell's working directory without producing a `cd` this guard tracks; `cd -`,
-// a bare `cd` (jumps to $HOME) and a target built from command substitution can't be resolved either.
-// Any of these makes the folder a later runner call actually runs in unverifiable.
-const PUSHD_POPD = /(?:^|[;&|(\n])\s*(?:pushd|popd)\b/;
-const CD_DASH = /(?:^|[;&|(\n])\s*cd\s+-(?:\s|$)/;
-const CD_NO_ARG = /(?:^|[;&|(\n])\s*cd\s*(?:[;&|)\n]|$)/;
-const CD_EXPANSION = /(?:^|[;&|(\n])\s*cd\s+[^\s;&|)]*[`$][^\s;&|)]*/;
 
 const LABELS = {
   alwaysDownloads: (call) => `Blocked: "${call}" always downloads a package. Ask Adrianus before installing anything.`,
   error: (reason) => `Blocked: the npx guard could not check this command (${reason}).`,
-  invalidName: (spec) => `Blocked: "${spec}" is not a plain package name, so the guard cannot tell whether the runner would download it. Ask Adrianus.`,
   installFlag: (call) => `Blocked: "${call}" asks the runner to install a package. Ask Adrianus before installing anything.`,
+  invalidName: (spec) => `Blocked: "${spec}" is not a plain package name, so the guard cannot tell whether the runner would download it. Ask Adrianus.`,
   notInstalled: (tool, folder) =>
     `Blocked: "${tool}" is not installed in ${folder} or any folder above it, so the runner would download it. Use node_modules/.bin/<tool> from the project, or ask Adrianus before installing anything.`,
-  opaque: () => `Blocked: this command hides a package runner behind eval/backticks/$()/xargs or another shell, which the guard cannot fully parse. Ask Adrianus before installing anything.`,
-  quotedFlag: (call) => `Blocked: "${call}" quotes or escapes a flag, so the guard cannot check it. Write the flags plainly.`,
-  tooLong: (length) => `Blocked: this command is ${length} characters long and mentions a package runner, too long for the guard to check safely. Ask Adrianus.`,
-  unparsed: (call) => `Blocked: "${call}" invokes a package runner in a shape the guard cannot fully parse (unusual flags or wrapper options). Ask Adrianus before installing anything.`,
-  unresolvableCd: () => `Blocked: this command changes directory in a way the guard cannot resolve (pushd/popd, "cd -", a bare cd, or a computed path), so it cannot verify where a package runner would run. Ask Adrianus before installing anything.`,
+  opaqueShell: () =>
+    'Blocked: this command mentions a package runner inside backticks, $(), eval, xargs or a shell -c, which the guard cannot check. Run the tool directly.',
+  tooLong: (length) =>
+    `Blocked: this command mentions a package runner and is ${length} characters long, over the guard's ${MAX_RUNNER_COMMAND_LENGTH}-character limit. Split it up.`,
+  unplainFlag: (call) => `Blocked: "${call}" has a flag the shell would rewrite, so the guard cannot check it. Write the flags plainly.`,
+  unreadableCall: (segment) => `Blocked: "${segment}" runs a package runner the guard cannot read. Write it as <runner> <flags> <package>.`,
+  untrackedCd: (call) =>
+    `Blocked: "${call}" runs after a directory change the guard cannot follow (pushd/popd, cd -, a bare cd, a cd flag or expansion, or a subshell). Use cd with a plain path.`,
   versioned: (spec) => `Blocked: "${spec}" names a version, which the runner may download. Use node_modules/.bin/<tool> from the project, or ask Adrianus.`,
 };
 
@@ -78,71 +64,80 @@ const block = (message) => {
   process.exit(2);
 };
 
+const isInstallFlag = (flag) => {
+  if (INSTALL_SHORT_FLAG.test(flag)) return true;
+
+  const name = flag.match(/^--([^=]+)/)?.[1];
+
+  return Boolean(name) && INSTALL_FLAG_NAMES.some((full) => full.startsWith(name));
+};
+
 // "@scope/name" → "name"; "tsx" → "tsx".
 const binNameOf = (spec) => spec.replace(/^@[^/]+\//, '');
-
-const hasUnresolvableCdBefore = (text) =>
-  PUSHD_POPD.test(text) || CD_DASH.test(text) || CD_NO_ARG.test(text) || CD_EXPANSION.test(text);
 
 function check(input) {
   const command = input.tool_input?.command ?? '';
   const startDir = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
-  if (RUNNER_NAME.test(command) && command.length > MAX_RUNNER_COMMAND_LENGTH) block(LABELS.tooLong(command.length));
-  if (OPAQUE_SHELL.test(command) && RUNNER_NAME.test(command)) block(LABELS.opaque());
+  if (!RUNNER_MENTION.test(command)) return;
+  if (command.length > MAX_RUNNER_COMMAND_LENGTH) block(LABELS.tooLong(command.length));
+  if (OPAQUE_SHELL.test(command)) block(LABELS.opaqueShell());
 
-  // The folder the runner runs in: fold every `cd` before it in order, each resolved against where the
-  // previous one landed (not always the session's folder) — "cd a && cd .." must land back at the start.
+  // The folder the runner runs in: every `cd` before it, in order, each resolved from where the previous one
+  // landed. null when one of them cannot be followed.
   const folderAt = (index) => {
-    if (hasUnresolvableCdBefore(command.slice(0, index))) block(LABELS.unresolvableCd());
+    let folder = startDir;
+    for (const step of command.matchAll(CD_STEP)) {
+      if (step.index >= index) break;
 
-    let current = startDir;
-    for (const match of command.matchAll(CD_CALL)) {
-      if (match.index >= index) break;
+      const [, verb, args] = step;
+      const target = args.trim().match(CD_TARGET);
+      // A ) between the cd and the runner closes a subshell, so the runner may not run where the cd went.
+      if (verb !== 'cd' || !target || command.slice(step.index, index).includes(')')) return null;
 
-      const target = match[1].replace(/^["']|["']$/g, '').replace(/^~(?=\/|$)/, process.env.HOME ?? '~');
-      current = path.resolve(current, target);
+      const word = target[1] ?? target[2] ?? target[3];
+      if (/^~[^/]/.test(word)) return null;
+
+      folder = path.resolve(folder, word.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'));
     }
 
-    return current;
+    return folder;
   };
 
-  // Like npx: look for node_modules/.bin/<name> in the folder and every folder above it. For a scoped
-  // spec, also require node_modules/<@scope/name> itself to be present there — scoped packages are
-  // always installed under their own full name, so an unrelated package cannot satisfy the check just
-  // by installing a bin of the same short name. An unscoped package's directory name doesn't always
-  // match its bin name (e.g. "typescript" provides "tsc"), so that extra check only applies when scoped.
+  // Like npx: look for node_modules/.bin/<name> in the folder and every folder above it. A scoped spec must
+  // also have its own package at that level, so another package's bin of the same name does not count.
   const isInstalled = (folder, spec) => {
-    const name = binNameOf(spec);
-    const scopedPackage = spec.startsWith('@') ? spec : null;
     for (let current = folder; ; current = path.dirname(current)) {
-      const nodeModules = path.join(current, 'node_modules');
-      const binFound = fs.existsSync(path.join(nodeModules, '.bin', name));
-      const packageFound = !scopedPackage || fs.existsSync(path.join(nodeModules, scopedPackage));
-      if (binFound && packageFound) return true;
+      const modules = path.join(current, 'node_modules');
+      const hasBin = fs.existsSync(path.join(modules, '.bin', binNameOf(spec)));
+      if (hasBin && (!spec.startsWith('@') || fs.existsSync(path.join(modules, spec)))) return true;
       if (current === path.dirname(current)) return false;
     }
   };
 
-  // Fail closed on any runner name in command position whose own token start RUNNER_CALL's stricter
-  // shape didn't land on — comparing the runner token itself, not just the overall match start, so a
-  // wrapper-prefix that the two regexes read differently in length still can't hide a bypass.
-  const runnerTokenStart = (match) => match.indices[1][0];
-  const parsedRunnerStarts = new Set([...command.matchAll(RUNNER_CALL)].map(runnerTokenStart));
-  for (const match of command.matchAll(RUNNER_IN_POSITION)) {
-    if (!parsedRunnerStarts.has(runnerTokenStart(match))) block(LABELS.unparsed(match[0].trim()));
-  }
-
+  const parsedAt = new Set();
   for (const match of command.matchAll(RUNNER_CALL)) {
     const [call, runner, flags, spec] = match;
+    parsedAt.add(match.index);
     if (ALWAYS_DOWNLOADS.test(runner)) block(LABELS.alwaysDownloads(call.trim()));
-    if (SHELL_QUOTING.test(flags)) block(LABELS.quotedFlag(call.trim()));
-    if (flags.trim().split(/\s+/).some((flag) => INSTALL_FLAGS.test(flag))) block(LABELS.installFlag(call.trim()));
+    const flagList = flags.trim().split(/\s+/).filter(Boolean);
+    if (!flagList.every((flag) => PLAIN_FLAG.test(flag))) block(LABELS.unplainFlag(call.trim()));
+    if (flagList.some(isInstallFlag)) block(LABELS.installFlag(call.trim()));
     if (VERSIONED.test(spec)) block(LABELS.versioned(spec));
     if (!PACKAGE_NAME.test(spec)) block(LABELS.invalidName(spec));
 
     const folder = folderAt(match.index);
+    if (folder === null) block(LABELS.untrackedCd(call.trim()));
     if (!isInstalled(folder, spec)) block(LABELS.notInstalled(spec, folder));
+  }
+
+  // A runner call the pattern above could not read (a wrapper flag with a value, an odd flag) is blocked, not
+  // let through unchecked.
+  for (const segment of command.matchAll(SEGMENT)) {
+    const body = segment[0].replace(/^[;&|(\n]/, '');
+    if (SEGMENT_START.test(body) && RUNNER_MENTION.test(body) && !parsedAt.has(segment.index)) {
+      block(LABELS.unreadableCall(body.trim()));
+    }
   }
 }
 
